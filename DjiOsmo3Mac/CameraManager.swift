@@ -38,6 +38,11 @@ final class CameraManager: NSObject, ObservableObject {
     private var timelapseTimer: Timer?
     @Published var timelapseCount: Int = 0
 
+    // Continuity Camera effects — class-level on AVCaptureDevice, mirrored for SwiftUI.
+    // Center Stage is settable; Portrait mode is read-only (user controls via Control Center).
+    @Published var centerStageEnabled: Bool = AVCaptureDevice.isCenterStageEnabled
+    @Published var portraitEffectActive: Bool = AVCaptureDevice.isPortraitEffectEnabled
+
     // Called on a background queue with each video frame (for TrackingEngine).
     // nonisolated(unsafe) so the AVCaptureVideoDataOutputSampleBufferDelegate
     // can read it without a MainActor hop on every frame.
@@ -55,6 +60,11 @@ final class CameraManager: NSObject, ObservableObject {
     override init() {
         super.init()
         discoverCameras()
+        observeDeviceConnections()
+    }
+
+    deinit {
+        NotificationCenter.default.removeObserver(self)
     }
 
     // MARK: Discovery
@@ -68,6 +78,70 @@ final class CameraManager: NSObject, ObservableObject {
         availableCameras = discovery.devices
         if selectedCamera == nil {
             selectedCamera = availableCameras.first
+        }
+    }
+
+    /// True when a Continuity Camera iPhone is in the available list.
+    var continuityCamera: AVCaptureDevice? {
+        availableCameras.first { $0.deviceType == .continuityCamera }
+    }
+
+    func isContinuityCamera(_ device: AVCaptureDevice) -> Bool {
+        device.deviceType == .continuityCamera
+    }
+
+    // MARK: Continuity Camera effects
+
+    // Center Stage and Portrait Effect are class-level (global) on AVCaptureDevice —
+    // they affect all cameras system-wide, not just one device instance.
+
+    func setCenterStage(_ enabled: Bool) {
+        AVCaptureDevice.isCenterStageEnabled = enabled
+        centerStageEnabled = AVCaptureDevice.isCenterStageEnabled
+    }
+
+    private func refreshEffectStates() {
+        centerStageEnabled = AVCaptureDevice.isCenterStageEnabled
+        portraitEffectActive = AVCaptureDevice.isPortraitEffectEnabled
+    }
+
+    // MARK: Dynamic device connection observation
+
+    private func observeDeviceConnections() {
+        let nc = NotificationCenter.default
+        nc.addObserver(self,
+                       selector: #selector(handleDeviceConnected(_:)),
+                       name: AVCaptureDevice.wasConnectedNotification,
+                       object: nil)
+        nc.addObserver(self,
+                       selector: #selector(handleDeviceDisconnected(_:)),
+                       name: AVCaptureDevice.wasDisconnectedNotification,
+                       object: nil)
+    }
+
+    @objc private func handleDeviceConnected(_ note: Notification) {
+        Task { @MainActor in
+            let prev = availableCameras
+            discoverCameras()
+            // Auto-switch to Continuity Camera when iPhone first appears
+            if let iphone = continuityCamera, !prev.contains(iphone) {
+                switchCamera(iphone)
+            }
+        }
+    }
+
+    @objc private func handleDeviceDisconnected(_ note: Notification) {
+        Task { @MainActor in
+            discoverCameras()
+            // If the disconnected device was selected, fall back to first available
+            if let gone = note.object as? AVCaptureDevice, gone == selectedCamera {
+                if let fallback = availableCameras.first {
+                    switchCamera(fallback)
+                } else {
+                    stop()
+                }
+            }
+            refreshEffectStates()
         }
     }
 
@@ -104,6 +178,7 @@ final class CameraManager: NSObject, ObservableObject {
             self.addInput(device)
             self.session.commitConfiguration()
         }
+        refreshEffectStates()
     }
 
     func switchToNextCamera() {

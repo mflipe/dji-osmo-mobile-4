@@ -141,9 +141,21 @@ private struct CameraPanel: View {
                 set: { if let cam = $0 { cameraManager.switchCamera(cam) } }
             )) {
                 ForEach(cameraManager.availableCameras, id: \.uniqueID) { cam in
-                    Text(cam.localizedName).tag(Optional(cam))
+                    Label {
+                        Text(cam.localizedName)
+                    } icon: {
+                        Image(systemName: cameraManager.isContinuityCamera(cam)
+                              ? "iphone.gen3" : "camera")
+                    }
+                    .tag(Optional(cam))
                 }
             }
+
+            if cameraManager.continuityCamera != nil {
+                ContinuityCameraEffectsView()
+            }
+
+            Divider()
 
             Picker("Mode", selection: $cameraManager.captureMode) {
                 ForEach(CaptureMode.allCases) { m in
@@ -162,6 +174,39 @@ private struct CameraPanel: View {
 
             Toggle("Grid overlay", isOn: $settings.showGrid)
         }
+    }
+}
+
+private struct ContinuityCameraEffectsView: View {
+    @EnvironmentObject var cameraManager: CameraManager
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Label("iPhone Effects", systemImage: "iphone.gen3")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+
+            // Center Stage — settable by apps
+            Toggle("Center Stage", isOn: Binding(
+                get: { cameraManager.centerStageEnabled },
+                set: { cameraManager.setCenterStage($0) }
+            ))
+            .font(.caption)
+
+            // Portrait mode — read-only, controlled via Control Center
+            HStack {
+                Image(systemName: "person.crop.rectangle")
+                    .foregroundStyle(cameraManager.portraitEffectActive ? .primary : .secondary)
+                Text("Portrait mode")
+                Spacer()
+                Text(cameraManager.portraitEffectActive ? "On" : "Off")
+                    .foregroundStyle(.secondary)
+            }
+            .font(.caption)
+
+        }
+        .padding(8)
+        .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
     }
 }
 
