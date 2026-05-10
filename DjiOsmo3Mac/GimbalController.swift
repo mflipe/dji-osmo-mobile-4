@@ -1,6 +1,8 @@
+import AppKit
 import Foundation
 import Combine
 import CoreBluetooth
+import CoreMedia
 
 // High-level gimbal controller. Owns the BLEManager, builds DUML frames,
 // parses telemetry, and exposes observable state to SwiftUI.
@@ -65,6 +67,10 @@ final class GimbalController: NSObject, ObservableObject {
     @Published var identifier: String = DUML.defaultIdentifier
     @Published var autoPair: Bool = true
 
+    // Tracking
+    @Published var isTracking = false
+    @Published var trackingBounds: CGRect? = nil
+
     struct LogEntry: Identifiable {
         let id = UUID()
         let timestamp: Date
@@ -73,15 +79,24 @@ final class GimbalController: NSObject, ObservableObject {
         enum Direction { case info, tx, rx, err }
     }
 
-    // MARK: Internals
+    // MARK: Dependencies
 
     private let ble = BLEManager()
     private let seq = DUMLSequencer()
     private var pairingTimer: Timer?
 
+    let cameraManager = CameraManager()
+    let settings = SettingsModel()
+    private let tracking = TrackingEngine()
+
+    // Keyboard joystick: tracks currently-pressed keys.
+    private var heldKeys: Set<String> = []
+    private var joystickTimer: Timer?
+
     override init() {
         super.init()
         ble.delegate = self
+        setupTrackingPipeline()
     }
 
     // MARK: User actions
@@ -114,8 +129,6 @@ final class GimbalController: NSObject, ObservableObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
             self?.sendPairingPin()
         }
-        // Fall back to .ready after 4s even without an explicit ack — the OM3
-        // accepts gimbal commands even before WiFi pairing completes.
         pairingTimer?.invalidate()
         pairingTimer = Timer.scheduledTimer(withTimeInterval: 4, repeats: false) { [weak self] _ in
             Task { @MainActor in
@@ -144,50 +157,199 @@ final class GimbalController: NSObject, ObservableObject {
     // MARK: Gimbal commands
 
     func recenter() {
-        // Absolute angle (0,0,0) on all axes, ~3s duration.
         var p: [UInt8] = []
-        p.append(contentsOf: i16le(0)) // pitch ×0.1°
-        p.append(contentsOf: i16le(0)) // roll
-        p.append(contentsOf: i16le(0)) // yaw
-        p.append(0x07)                  // axis flags: pitch|roll|yaw
-        p.append(30)                    // duration ×0.1s
+        p.append(contentsOf: i16le(0)); p.append(contentsOf: i16le(0)); p.append(contentsOf: i16le(0))
+        p.append(0x07)
+        p.append(30)
         sendGimbal(cmd: DUML.GimbalCmd.absAngle, payload: p, label: "Recenter")
     }
 
     func setMode(_ m: Mode) {
         mode = m
-        let payload: [UInt8] = [m.dumlValue.rawValue, 0x00]
-        sendGimbal(cmd: DUML.GimbalCmd.setMode, payload: payload, label: "SetMode(\(m.rawValue))")
+        sendGimbal(cmd: DUML.GimbalCmd.setMode, payload: [m.dumlValue.rawValue, 0x00], label: "SetMode(\(m.rawValue))")
     }
 
-    // Absolute angle command: pitch & yaw in degrees (roll left at 0).
-    // Used by sliders.
     func setAngle(pitchDeg: Double, yawDeg: Double, durationSec: Double = 1.0) {
-        let pitch = Int16(clamping: Int(pitchDeg * 10).clamped(-1800, 1800))
-        let yaw   = Int16(clamping: Int(yawDeg * 10).clamped(-1800, 1800))
-        var p: [UInt8] = []
-        p.append(contentsOf: i16le(pitch))
-        p.append(contentsOf: i16le(0))    // roll
-        p.append(contentsOf: i16le(yaw))
-        p.append(0x05)                     // pitch + yaw only
-        p.append(UInt8(min(255, max(1, Int(durationSec * 10)))))
-        sendGimbal(cmd: DUML.GimbalCmd.absAngle, payload: p, label: "Angle(p=\(pitchDeg)°, y=\(yawDeg)°)")
+        let p = Int16(clamping: Int(pitchDeg * 10).clamped(-1800, 1800))
+        let y = Int16(clamping: Int(yawDeg * 10).clamped(-1800, 1800))
+        var payload: [UInt8] = []
+        payload.append(contentsOf: i16le(p)); payload.append(contentsOf: i16le(0)); payload.append(contentsOf: i16le(y))
+        payload.append(0x05)
+        payload.append(UInt8(min(255, max(1, Int(durationSec * 10)))))
+        sendGimbal(cmd: DUML.GimbalCmd.absAngle, payload: payload, label: "Angle(p=\(pitchDeg)°, y=\(yawDeg)°)")
     }
 
-    // Velocity control (degrees/s).
     func setSpeed(pitchDeg: Double, yawDeg: Double) {
-        let pitch = Int16(clamping: Int(pitchDeg * 10).clamped(-1800, 1800))
-        let yaw   = Int16(clamping: Int(yawDeg * 10).clamped(-1800, 1800))
-        var p: [UInt8] = []
-        p.append(contentsOf: i16le(pitch))
-        p.append(contentsOf: i16le(0))    // roll
-        p.append(contentsOf: i16le(yaw))
-        p.append(0x01)                     // enable bit
-        sendGimbal(cmd: DUML.GimbalCmd.speedCtrl, payload: p, label: "Speed(p=\(pitchDeg), y=\(yawDeg))")
+        let scale = settings.sportMode ? 2.0 : 1.0
+        let panSign: Double = settings.invertPan ? -1 : 1
+        let tiltSign: Double = settings.invertTilt ? -1 : 1
+
+        let rawPitch = pitchDeg * scale * tiltSign
+        let rawYaw   = yawDeg   * scale * panSign
+
+        let p = Int16(clamping: Int(rawPitch * 10).clamped(-1800, 1800))
+        let y = Int16(clamping: Int(rawYaw   * 10).clamped(-1800, 1800))
+        var payload: [UInt8] = []
+        payload.append(contentsOf: i16le(p)); payload.append(contentsOf: i16le(0)); payload.append(contentsOf: i16le(y))
+        payload.append(0x01)
+        sendGimbal(cmd: DUML.GimbalCmd.speedCtrl, payload: payload, label: "Speed(p=\(pitchDeg), y=\(yawDeg))")
     }
 
-    func stopMotion() {
-        setSpeed(pitchDeg: 0, yawDeg: 0)
+    func stopMotion() { setSpeed(pitchDeg: 0, yawDeg: 0) }
+
+    func calibrate() {
+        // Calibration cmd ID TBD — will be confirmed via device log.
+        appendLog(.info, "Calibrate: cmd ID TBD — connect and check RX log.")
+    }
+
+    // MARK: Tracking
+
+    func toggleTracking() {
+        tracking.toggle()
+        isTracking = tracking.isActive
+        if !isTracking { trackingBounds = nil; stopMotion() }
+    }
+
+    func setTrackingTarget(faceOnly: Bool) {
+        tracking.target = faceOnly ? .face : .body
+        tracking.reset()
+    }
+
+    private func setupTrackingPipeline() {
+        cameraManager.frameHandler = { [weak self] buffer in
+            guard let self else { return }
+            guard let out = self.tracking.process(sampleBuffer: buffer) else { return }
+            Task { @MainActor in
+                self.trackingBounds = out.bounds
+                if self.isReady {
+                    self.setSpeed(pitchDeg: out.pitch, yawDeg: out.yaw)
+                }
+            }
+        }
+    }
+
+    // MARK: Keyboard joystick
+
+    func keyDown(_ key: String) {
+        guard heldKeys.insert(key).inserted else { return }
+        if joystickTimer == nil {
+            joystickTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30, repeats: true) { [weak self] _ in
+                self?.applyKeyboardJoystick()
+            }
+        }
+    }
+
+    func keyUp(_ key: String) {
+        heldKeys.remove(key)
+        if heldKeys.isEmpty {
+            joystickTimer?.invalidate()
+            joystickTimer = nil
+            stopMotion()
+        }
+    }
+
+    private func applyKeyboardJoystick() {
+        guard isReady else { return }
+        var p: Double = 0, y: Double = 0
+        let speed = settings.joystickSpeed.degreesPerSecond
+
+        if heldKeys.contains("w") || heldKeys.contains(String(UnicodeScalar(NSUpArrowFunctionKey)!))    { p += speed }
+        if heldKeys.contains("s") || heldKeys.contains(String(UnicodeScalar(NSDownArrowFunctionKey)!))  { p -= speed }
+        if heldKeys.contains("a") || heldKeys.contains(String(UnicodeScalar(NSLeftArrowFunctionKey)!))  { y -= speed }
+        if heldKeys.contains("d") || heldKeys.contains(String(UnicodeScalar(NSRightArrowFunctionKey)!)) { y += speed }
+
+        switch settings.axisMode {
+        case .horizontal: p = 0
+        case .vertical:   y = 0
+        case .free:       break
+        }
+
+        setSpeed(pitchDeg: p, yawDeg: y)
+    }
+
+    // MARK: Physical button handlers (cmd IDs are TBD — update DUML.ButtonCmd when confirmed)
+
+    private func handleButtonFrame(_ frame: DUMLFrame) {
+        guard frame.cmdSet == DUML.ButtonCmd.cmdSet else { return }
+        switch frame.cmdId {
+        case DUML.ButtonCmd.shutter:
+            handleShutterPress(frame.payload)
+        case DUML.ButtonCmd.joystick:
+            handleJoystickNotify(frame.payload)
+        case DUML.ButtonCmd.trigger:
+            handleTriggerPress(frame.payload)
+        case DUML.ButtonCmd.mButton:
+            handleMButtonPress(frame.payload)
+        case DUML.ButtonCmd.zoom:
+            handleZoomSlider(frame.payload)
+        default:
+            break
+        }
+    }
+
+    private func handleShutterPress(_ payload: [UInt8]) {
+        let held = payload.first == 0x02
+        if held {
+            cameraManager.startBurst()
+        } else {
+            cameraManager.stopBurst()
+            if cameraManager.captureMode == .video {
+                cameraManager.toggleRecording()
+            } else {
+                cameraManager.capturePhoto()
+            }
+        }
+    }
+
+    private func handleJoystickNotify(_ payload: [UInt8]) {
+        guard isReady, payload.count >= 4 else { return }
+        let rawX = Int16(bitPattern: UInt16(payload[0]) | UInt16(payload[1]) << 8)
+        let rawY = Int16(bitPattern: UInt16(payload[2]) | UInt16(payload[3]) << 8)
+        let speed = settings.joystickSpeed.degreesPerSecond
+        let yaw   = Double(rawX) / 1000.0 * speed
+        let pitch = Double(rawY) / 1000.0 * speed
+        setSpeed(pitchDeg: pitch, yawDeg: yaw)
+    }
+
+    private func handleTriggerPress(_ payload: [UInt8]) {
+        let clicks = payload.first ?? 1
+        switch clicks {
+        case 1:
+            if isTracking { toggleTracking() }
+        case 2:
+            recenter()
+        case 3:
+            cameraManager.switchToNextCamera()
+        default:
+            break
+        }
+    }
+
+    private func handleMButtonPress(_ payload: [UInt8]) {
+        let clicks = payload.first ?? 1
+        switch clicks {
+        case 1:
+            switch settings.mButtonAction {
+            case .toggleMode:
+                let modes = Mode.allCases
+                let next = modes[(modes.firstIndex(of: mode)! + 1) % modes.count]
+                setMode(next)
+            case .openPanel:
+                break  // handled in UI
+            }
+        case 2:
+            break  // landscape/portrait toggle — handled in UI
+        case 3:
+            if isTracking { toggleTracking() }
+        default:
+            break
+        }
+    }
+
+    private func handleZoomSlider(_ payload: [UInt8]) {
+        guard let raw = payload.first else { return }
+        let delta: CGFloat = raw > 127 ? 0.5 : -0.5
+        cameraManager.adjustZoom(delta: delta)
     }
 
     // MARK: Sending
@@ -205,9 +367,9 @@ final class GimbalController: NSObject, ObservableObject {
     }
 
     private func send(_ frame: DUMLFrame, label: String) {
-        let bytes = frame.encode()
-        appendLog(.tx, "→ \(label) [\(hex(bytes))]")
-        ble.writeDUML(frame)
+        let encoded = frame.encode()
+        appendLog(.tx, "→ \(label) [\(hex(encoded))]")
+        ble.writeDUML(frame, encoded: encoded)
     }
 
     // MARK: Log
@@ -221,6 +383,13 @@ final class GimbalController: NSObject, ObservableObject {
     func clearLog() { log.removeAll() }
 
     // MARK: Helpers
+
+    var isReady: Bool {
+        switch connectionState {
+        case .ready, .connected: return true
+        default: return false
+        }
+    }
 
     private func i16le(_ v: Int16) -> [UInt8] {
         [UInt8(bitPattern: Int8(truncatingIfNeeded: v)),
@@ -268,11 +437,7 @@ extension GimbalController: BLEManagerDelegate {
         Task { @MainActor in
             self.connectionState = .connected
             self.appendLog(.info, "BLE characteristics ready.")
-            if self.autoPair {
-                self.startPairing()
-            } else {
-                self.connectionState = .ready
-            }
+            if self.autoPair { self.startPairing() } else { self.connectionState = .ready }
         }
     }
 
@@ -287,24 +452,23 @@ extension GimbalController: BLEManagerDelegate {
     @MainActor
     private func handleFrame(_ frame: DUMLFrame) {
         // Gimbal telemetry push (cmdSet=0x04, cmdId=0x05).
-        if frame.cmdSet == DUML.CmdSet.gimbal,
-           frame.cmdId == DUML.GimbalCmd.pushPos,
+        if frame.cmdSet == DUML.CmdSet.gimbal, frame.cmdId == DUML.GimbalCmd.pushPos,
            frame.payload.count >= 6 {
             let p = frame.payload
-            let pitchRaw = Int16(bitPattern: UInt16(p[0]) | (UInt16(p[1]) << 8))
-            let rollRaw  = Int16(bitPattern: UInt16(p[2]) | (UInt16(p[3]) << 8))
-            let yawRaw   = Int16(bitPattern: UInt16(p[4]) | (UInt16(p[5]) << 8))
-            self.pitch = Double(pitchRaw) / 10.0
-            self.roll  = Double(rollRaw) / 10.0
-            self.yaw   = Double(yawRaw) / 10.0
+            pitch = Double(Int16(bitPattern: UInt16(p[0]) | UInt16(p[1]) << 8)) / 10.0
+            roll  = Double(Int16(bitPattern: UInt16(p[2]) | UInt16(p[3]) << 8)) / 10.0
+            yaw   = Double(Int16(bitPattern: UInt16(p[4]) | UInt16(p[5]) << 8)) / 10.0
             return
         }
 
         // Battery (cmdSet=0x0D / 0x06).
         if (frame.cmdSet == 0x0D || frame.cmdSet == DUML.CmdSet.battery),
            let first = frame.payload.first {
-            self.battery = Int(first)
+            battery = Int(first)
         }
+
+        // Physical button events.
+        handleButtonFrame(frame)
 
         // Pairing responses.
         if frame.cmdSet == DUML.CmdSet.wifi {
@@ -317,15 +481,13 @@ extension GimbalController: BLEManagerDelegate {
                 } else if status == 0x02 {
                     appendLog(.rx, "Pairing required — confirm on the gimbal.")
                 }
-            } else if frame.cmdId == DUML.WifiCmd.pairingApproved,
-                      frame.payload.first == 0x01 {
+            } else if frame.cmdId == DUML.WifiCmd.pairingApproved, frame.payload.first == 0x01 {
                 appendLog(.rx, "Pairing approved.")
                 pairingTimer?.invalidate()
                 connectionState = .ready
             }
         }
 
-        // Generic log line for unhandled frames (rate-limited by log cap).
         appendLog(.rx,
             String(format: "← cmdSet=%02X cmdId=%02X flags=%02X len=%d",
                    frame.cmdSet, frame.cmdId, frame.flags, frame.payload.count))
@@ -334,6 +496,6 @@ extension GimbalController: BLEManagerDelegate {
 
 // MARK: - Utilities
 
-private extension Comparable {
+extension Comparable {
     func clamped(_ a: Self, _ b: Self) -> Self { max(a, min(b, self)) }
 }

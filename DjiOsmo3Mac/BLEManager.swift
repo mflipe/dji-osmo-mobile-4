@@ -89,12 +89,13 @@ final class BLEManager: NSObject {
     }
 
     // Writes a fully-encoded DUML frame to FFF5 (the data channel).
-    func writeDUML(_ frame: DUMLFrame) {
+    // Pass pre-encoded bytes to avoid a redundant encode() call.
+    func writeDUML(_ frame: DUMLFrame, encoded: [UInt8]? = nil) {
         guard let p = peripheral, let c = charFFF5 else {
             delegate?.bleLog("writeDUML: not connected")
             return
         }
-        let bytes = frame.encode()
+        let bytes = encoded ?? frame.encode()
         let data = Data(bytes)
         // Chunk to MTU. Default ATT MTU is 23 (20 byte payload). If the
         // negotiated MTU is larger CoreBluetooth reports it via maximumWriteValueLength.

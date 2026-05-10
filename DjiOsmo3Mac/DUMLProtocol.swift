@@ -55,6 +55,18 @@ enum DUML {
         static let setMode:    UInt8 = 0x4C // 0=lock, 1=follow, 2=fpv (sport)
     }
 
+    // RC / button notification IDs — cmdSet = 0x06.
+    // Actual values must be confirmed by pressing each physical button on the OM3
+    // while watching the RX log (GimbalController logs all unknown frames).
+    enum ButtonCmd {
+        static let cmdSet: UInt8 = 0x06        // TBD: verify against live device log
+        static let shutter:  UInt8 = 0x01      // TBD
+        static let joystick: UInt8 = 0x02      // TBD
+        static let trigger:  UInt8 = 0x03      // TBD
+        static let mButton:  UInt8 = 0x04      // TBD
+        static let zoom:     UInt8 = 0x05      // TBD
+    }
+
     enum WifiCmd {
         static let setPairingPin:  UInt8 = 0x45
         static let pairingApproved: UInt8 = 0x46
