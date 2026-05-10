@@ -35,7 +35,9 @@ final class TrackingEngine {
 
     // Vision requests (lazy so they are created once).
     private lazy var faceRequest = VNDetectFaceRectanglesRequest()
-    private lazy var bodyRequest = VNDetectHumanBodyPoseRequest()
+    // VNDetectHumanRectanglesRequest returns VNHumanObservation which has boundingBox.
+    // VNDetectHumanBodyPoseRequest returns pose keypoints only, not a bounding box.
+    private lazy var bodyRequest = VNDetectHumanRectanglesRequest()
     private let ciContext = CIContext()
 
     // MARK: Public API
@@ -92,11 +94,14 @@ final class TrackingEngine {
                      prevError: inout Double,
                      kP: Double, kI: Double, kD: Double,
                      dt: Double) -> Double {
-        integral = (integral + error * dt).clamped(-integralClamp / kI, integralClamp / kI)
+        let rawIntegral = integral + error * dt
+        let clampLimit = integralClamp / max(kI, 1e-9)
+        integral = max(-clampLimit, min(clampLimit, rawIntegral))
         let derivative = (error - prevError) / dt
         prevError = error
         let output = kP * error + kI * integral + kD * derivative
-        return output.clamped(-integralClamp * 4, integralClamp * 4)
+        let outputLimit = integralClamp * 4
+        return max(-outputLimit, min(outputLimit, output))
     }
 }
 

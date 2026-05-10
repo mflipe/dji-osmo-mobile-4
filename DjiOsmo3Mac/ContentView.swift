@@ -129,63 +129,65 @@ private struct DevicePanel: View {
 }
 
 private struct CameraPanel: View {
-    @EnvironmentObject var ctl: GimbalController
+    @EnvironmentObject var cameraManager: CameraManager
+    @EnvironmentObject var settings: SettingsModel
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Camera").font(.headline)
 
             Picker("Device", selection: Binding(
-                get: { ctl.cameraManager.selectedCamera },
-                set: { if let cam = $0 { ctl.cameraManager.switchCamera(cam) } }
+                get: { cameraManager.selectedCamera },
+                set: { if let cam = $0 { cameraManager.switchCamera(cam) } }
             )) {
-                ForEach(ctl.cameraManager.availableCameras, id: \.uniqueID) { cam in
+                ForEach(cameraManager.availableCameras, id: \.uniqueID) { cam in
                     Text(cam.localizedName).tag(Optional(cam))
                 }
             }
 
-            Picker("Mode", selection: $ctl.cameraManager.captureMode) {
+            Picker("Mode", selection: $cameraManager.captureMode) {
                 ForEach(CaptureMode.allCases) { m in
                     Label(m.rawValue, systemImage: m.systemImage).tag(m)
                 }
             }
 
-            if ctl.cameraManager.captureMode == .timelapse {
+            if cameraManager.captureMode == .timelapse {
                 HStack {
                     Text("Interval").font(.caption)
-                    Slider(value: $ctl.cameraManager.timelapseInterval, in: 0.5...30, step: 0.5)
-                    Text("\(String(format: "%.1f", ctl.cameraManager.timelapseInterval))s")
+                    Slider(value: $cameraManager.timelapseInterval, in: 0.5...30, step: 0.5)
+                    Text("\(String(format: "%.1f", cameraManager.timelapseInterval))s")
                         .font(.caption).monospacedDigit()
                 }
             }
 
-            Toggle("Grid overlay", isOn: $ctl.settings.showGrid)
+            Toggle("Grid overlay", isOn: $settings.showGrid)
         }
     }
 }
 
 private struct SettingsPanel: View {
     @EnvironmentObject var ctl: GimbalController
+    @EnvironmentObject var settings: SettingsModel
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Gimbal").font(.headline)
 
-            Picker("Speed", selection: $ctl.settings.joystickSpeed) {
+            Picker("Speed", selection: $settings.joystickSpeed) {
                 ForEach(JoystickSpeed.allCases) { s in Text(s.rawValue).tag(s) }
             }
 
-            Picker("Axis", selection: $ctl.settings.axisMode) {
+            Picker("Axis", selection: $settings.axisMode) {
                 ForEach(AxisMode.allCases) { a in Text(a.rawValue).tag(a) }
             }
 
-            Toggle("Invert pan",  isOn: $ctl.settings.invertPan)
-            Toggle("Invert tilt", isOn: $ctl.settings.invertTilt)
-            Toggle("Sport multiplier", isOn: $ctl.settings.sportMode)
+            Toggle("Invert pan",  isOn: $settings.invertPan)
+            Toggle("Invert tilt", isOn: $settings.invertTilt)
+            Toggle("Sport multiplier", isOn: $settings.sportMode)
 
             Divider()
             Text("M button").font(.headline)
-            Picker("Action", selection: $ctl.settings.mButtonAction) {
+            Picker("Action", selection: $settings.mButtonAction) {
                 ForEach(MButtonAction.allCases) { a in Text(a.rawValue).tag(a) }
             }
 
@@ -200,6 +202,8 @@ private struct SettingsPanel: View {
 
 private struct MainDetail: View {
     @EnvironmentObject var ctl: GimbalController
+    @EnvironmentObject var cameraManager: CameraManager
+    @EnvironmentObject var settings: SettingsModel
 
     var body: some View {
         ZStack {
@@ -229,17 +233,17 @@ private struct MainDetail: View {
         .toolbar { toolbarContent }
         .background(.black)
         .onAppear {
-            if !ctl.cameraManager.isRunning { ctl.cameraManager.start() }
+            if !cameraManager.isRunning { cameraManager.start() }
         }
     }
 
     @ViewBuilder
     private var cameraBackground: some View {
-        if ctl.cameraManager.isRunning {
-            CameraPreviewView(cameraManager: ctl.cameraManager,
+        if cameraManager.isRunning {
+            CameraPreviewView(cameraManager: cameraManager,
                               trackingBounds: ctl.trackingBounds)
                 .ignoresSafeArea()
-            if ctl.settings.showGrid {
+            if settings.showGrid {
                 GridOverlay().ignoresSafeArea()
             }
         } else {
@@ -265,7 +269,7 @@ private struct MainDetail: View {
             StatusChip()
         }
         ToolbarItem(placement: .primaryAction) {
-            if ctl.cameraManager.isRecording {
+            if cameraManager.isRecording {
                 RecordingIndicator()
             }
         }
@@ -370,6 +374,8 @@ private struct TelemetryHUD: View {
 
 private struct BottomBar: View {
     @EnvironmentObject var ctl: GimbalController
+    @EnvironmentObject var cameraManager: CameraManager
+    @EnvironmentObject var settings: SettingsModel
 
     var body: some View {
         HStack(spacing: 12) {
@@ -388,10 +394,10 @@ private struct BottomBar: View {
             }
 
             Toggle(isOn: Binding(
-                get: { ctl.settings.trackingFaceOnly },
-                set: { ctl.settings.trackingFaceOnly = $0; ctl.setTrackingTarget(faceOnly: $0) }
+                get: { settings.trackingFaceOnly },
+                set: { settings.trackingFaceOnly = $0; ctl.setTrackingTarget(faceOnly: $0) }
             )) {
-                Text(ctl.settings.trackingFaceOnly ? "Face" : "Body").font(.caption)
+                Text(settings.trackingFaceOnly ? "Face" : "Body").font(.caption)
             }
             .toggleStyle(.button)
 
@@ -425,7 +431,7 @@ private struct BottomBar: View {
 
     @ViewBuilder
     private var captureButtons: some View {
-        let cam = ctl.cameraManager
+        let cam = cameraManager
 
         switch cam.captureMode {
         case .photo:
@@ -459,6 +465,7 @@ private struct BottomBar: View {
 
 private struct JoystickWidget: View {
     @EnvironmentObject var ctl: GimbalController
+    @EnvironmentObject var settings: SettingsModel
     @State private var dragOffset: CGSize = .zero
     private let size: CGFloat = 80
     private let knobSize: CGFloat = 32
@@ -481,7 +488,7 @@ private struct JoystickWidget: View {
                     let max = (size - knobSize) / 2
                     let nx = Double(dragOffset.width / max)
                     let ny = Double(-dragOffset.height / max)
-                    let speed = ctl.settings.joystickSpeed.degreesPerSecond
+                    let speed = settings.joystickSpeed.degreesPerSecond
                     if ctl.isReady {
                         ctl.setSpeed(pitchDeg: ny * speed, yawDeg: nx * speed)
                     }
@@ -648,5 +655,9 @@ final class KeyCaptureNSView: NSView {
 
 
 #Preview {
-    ContentView().environmentObject(GimbalController())
+    let ctl = GimbalController()
+    ContentView()
+        .environmentObject(ctl)
+        .environmentObject(ctl.cameraManager)
+        .environmentObject(ctl.settings)
 }

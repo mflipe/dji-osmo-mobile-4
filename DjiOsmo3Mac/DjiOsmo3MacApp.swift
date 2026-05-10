@@ -8,6 +8,8 @@ struct DjiOsmo3MacApp: App {
         Window("Osmo Mobile 3", id: "main") {
             ContentView()
                 .environmentObject(controller)
+                .environmentObject(controller.cameraManager)
+                .environmentObject(controller.settings)
         }
         .windowStyle(.plain)
         .windowToolbarStyle(.unified(showsTitle: false))

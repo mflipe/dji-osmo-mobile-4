@@ -39,7 +39,9 @@ final class CameraManager: NSObject, ObservableObject {
     @Published var timelapseCount: Int = 0
 
     // Called on a background queue with each video frame (for TrackingEngine).
-    var frameHandler: ((CMSampleBuffer) -> Void)?
+    // nonisolated(unsafe) so the AVCaptureVideoDataOutputSampleBufferDelegate
+    // can read it without a MainActor hop on every frame.
+    nonisolated(unsafe) var frameHandler: ((CMSampleBuffer) -> Void)?
 
     let session = AVCaptureSession()
     private let photoOutput = AVCapturePhotoOutput()
@@ -112,16 +114,11 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     // MARK: Zoom
+    // macOS AVCaptureDevice has no videoZoomFactor — zoom is applied visually
+    // via the preview layer's affineTransform in CameraPreviewView.
 
     func setZoom(_ factor: CGFloat) {
-        guard let device = selectedCamera else { return }
-        let clamped = max(1.0, min(factor, device.maxAvailableVideoZoomFactor))
-        sessionQueue.async {
-            try? device.lockForConfiguration()
-            device.videoZoomFactor = clamped
-            device.unlockForConfiguration()
-        }
-        zoomFactor = clamped
+        zoomFactor = max(1.0, min(factor, 8.0))
     }
 
     func adjustZoom(delta: CGFloat) {
