@@ -291,11 +291,12 @@ enum GimbalPayloadBuilder {
 
     static func setAngle(pitchDeg: Double, yawDeg: Double,
                          durationSec: Double = 1.0) -> (cmdId: UInt8, payload: [UInt8]) {
-        let p   = Int16(clamping: Int(pitchDeg * 10).clamped(-1800, 1800))
+        let p   = Int16(clamping: Int(-pitchDeg * 10).clamped(-1800, 1800))  // Pitch direction inverted
         let y   = Int16(clamping: Int(yawDeg   * 10).clamped(-1800, 1800))
         let dur = UInt8(min(255, max(1, Int(durationSec * 10))))
         // OM3 absAngle (0x14) wire layout: [yaw:i16LE, roll:i16LE, pitch:i16LE, mode:u8, time:u8]
         // Verified against OM Research (alkersan/om-research) — mode=0x05 for ABSOLUTE.
+        // NOTE: Pitch direction is inverted on OM3 — negative pitch commands move up.
         var payload = i16(y) + i16(0) + i16(p)
         payload.append(DUML.RotationMode.absolute.rawValue)
         payload.append(dur)
@@ -303,10 +304,11 @@ enum GimbalPayloadBuilder {
     }
 
     static func setSpeed(pitchDeg: Double, yawDeg: Double) -> (cmdId: UInt8, payload: [UInt8]) {
-        let p = Int16(clamping: Int(pitchDeg * 10).clamped(-1800, 1800))
+        let p = Int16(clamping: Int(-pitchDeg * 10).clamped(-1800, 1800))  // Pitch direction inverted
         let y = Int16(clamping: Int(yawDeg   * 10).clamped(-1800, 1800))
         // OM3 speedCtrl (0x0c) wire layout: [yaw:i16LE, roll:i16LE, pitch:i16LE, mode:u8, time:u8]
         // mode=0x80 for SPEED (velocity control), time=0 for continuous.
+        // NOTE: Pitch direction is inverted on OM3 — negative pitch commands move up.
         var payload = i16(y) + i16(0) + i16(p)
         payload.append(DUML.RotationMode.speed.rawValue)
         payload.append(0)  // time=0 for continuous velocity mode
