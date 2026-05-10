@@ -42,6 +42,8 @@ enum SidebarItem: String, CaseIterable, Identifiable {
     case settings           = "Settings"
     case calibration        = "Calibration"
     case manualCalibration  = "Manual Cal"
+    case waypointPan        = "Waypoint Pan"
+    case checkup            = "Checkup"
 
     var id: String { rawValue }
     var icon: String {
@@ -51,6 +53,8 @@ enum SidebarItem: String, CaseIterable, Identifiable {
         case .settings:           return "slider.horizontal.3"
         case .calibration:        return "dial.max"
         case .manualCalibration:  return "square.and.pencil"
+        case .waypointPan:        return "point.3.connected.trianglepath.dotted"
+        case .checkup:            return "checklist"
         }
     }
 }
@@ -59,7 +63,42 @@ private struct Sidebar: View {
     @EnvironmentObject var ctl: GimbalController
     @Binding var selection: SidebarItem?
 
+    private var isFullPanel: Bool {
+        selection == .waypointPan || selection == .checkup
+    }
+
     var body: some View {
+        if isFullPanel {
+            fullPanelView
+        } else {
+            listView
+        }
+    }
+
+    private var fullPanelView: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Button { selection = nil } label: {
+                    Label("Back", systemImage: "chevron.left")
+                        .font(.caption.weight(.medium))
+                }
+                .buttonStyle(.borderless)
+                Spacer()
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+            Divider()
+            ScrollView {
+                switch selection {
+                case .waypointPan: WaypointPanPanel()
+                case .checkup:     CheckupPanel()
+                default:           EmptyView()
+                }
+            }
+        }
+    }
+
+    private var listView: some View {
         List(selection: $selection) {
             Section("Connection") {
                 ForEach(SidebarItem.allCases) { item in
@@ -71,12 +110,12 @@ private struct Sidebar: View {
         .safeAreaInset(edge: .bottom) {
             Group {
                 switch selection {
-                case .devices:            DevicePanel()
-                case .camera:             CameraPanel()
-                case .settings:           SettingsPanel()
-                case .calibration:        CalibrationPanel()
-                case .manualCalibration:  ManualCalibrationPanel()
-                case .none:               EmptyView()
+                case .devices:           DevicePanel()
+                case .camera:           CameraPanel()
+                case .settings:         SettingsPanel()
+                case .calibration:      CalibrationPanel()
+                case .manualCalibration: ManualCalibrationPanel()
+                default:                EmptyView()
                 }
             }
             .padding(10)
@@ -677,6 +716,291 @@ private struct ManualCalibrationPanel: View {
     }
 }
 
+// MARK: - Checkup Panel
+
+private struct CheckupPanel: View {
+    @EnvironmentObject var checkup: GimbalCheckup
+    @EnvironmentObject var ctl: GimbalController
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 10) {
+                headerView
+                if checkup.steps.isEmpty {
+                    Text("Press Start to begin the checkup.")
+                        .font(.caption).foregroundStyle(.secondary)
+                } else {
+                    stepsListView
+                }
+            }
+            .padding(12)
+        }
+    }
+
+    // MARK: Header
+
+    private var headerView: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text("Gimbal Checkup")
+                    .font(.headline)
+                Spacer()
+                if checkup.isComplete {
+                    Text("\(checkup.passCount)/\(checkup.totalCount) passed")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(checkup.failCount == 0 ? .green : .orange)
+                }
+            }
+            HStack(spacing: 8) {
+                Button(checkup.isRunning ? "Stop" : "Start Checkup") {
+                    checkup.isRunning ? checkup.stop() : checkup.start()
+                }
+                .disabled(!ctl.isReady && !checkup.isRunning)
+                .buttonStyle(.borderedProminent)
+                .tint(checkup.isRunning ? .red : .blue)
+                .font(.caption.weight(.semibold))
+
+                if checkup.isRunning {
+                    ProgressView()
+                        .scaleEffect(0.7)
+                        .frame(width: 16, height: 16)
+                }
+            }
+        }
+    }
+
+    // MARK: Steps list
+
+    private var stepsListView: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            ForEach(checkup.steps) { step in
+                StepRow(step: step, isCurrent: step.index == checkup.currentIndex && checkup.isRunning)
+            }
+        }
+    }
+}
+
+private struct StepRow: View {
+    @EnvironmentObject var checkup: GimbalCheckup
+    let step: GimbalCheckup.StepRecord
+    let isCurrent: Bool
+    @State private var expanded = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            // Row header
+            Button {
+                if step.status == .done { expanded.toggle() }
+            } label: {
+                HStack(spacing: 8) {
+                    statusIcon
+                    Text(step.name)
+                        .font(.caption.weight(isCurrent ? .semibold : .regular))
+                        .foregroundStyle(isCurrent ? .primary : .secondary)
+                        .lineLimit(2)
+                    Spacer()
+                    if step.status == .done {
+                        Image(systemName: expanded ? "chevron.up" : "chevron.down")
+                            .font(.system(size: 9))
+                            .foregroundStyle(.tertiary)
+                    }
+                }
+                .padding(.vertical, 5)
+                .padding(.horizontal, 6)
+                .background(isCurrent ? Color.accentColor.opacity(0.08) : .clear,
+                            in: RoundedRectangle(cornerRadius: 5))
+            }
+            .buttonStyle(.plain)
+
+            // Manual recenter prompt (automatic step paused before running)
+            if step.status == .waitingUser, case .automatic = step.kind {
+                VStack(alignment: .leading, spacing: 6) {
+                    Label("Recenter the gimbal before this test", systemImage: "arrow.counterclockwise")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.orange)
+                    Text("Press the trigger button twice on the handle, or press the 0 key in the app, then tap Continue.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Button("Continue →") { checkup.continueFromPhysical() }
+                        .buttonStyle(.borderedProminent)
+                        .tint(.orange)
+                        .font(.caption.weight(.semibold))
+                        .padding(.top, 2)
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .background(.orange.opacity(0.06), in: RoundedRectangle(cornerRadius: 6))
+            }
+
+            // Physical step: show instruction + Continue button
+            if step.status == .waitingUser, case .physical(let instruction, let hint) = step.kind {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(instruction)
+                        .font(.caption)
+                        .fixedSize(horizontal: false, vertical: true)
+                    if let hint {
+                        Text(hint)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    if !checkup.capturedFrames.isEmpty {
+                        Text("\(checkup.capturedFrames.count) frame(s) captured so far…")
+                            .font(.caption2).foregroundStyle(.orange)
+                    }
+                    Button("Continue →") { checkup.continueFromPhysical() }
+                        .buttonStyle(.borderedProminent)
+                        .tint(.green)
+                        .font(.caption.weight(.semibold))
+                        .padding(.top, 2)
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .background(.green.opacity(0.06), in: RoundedRectangle(cornerRadius: 6))
+            }
+
+            // Expanded details for completed steps
+            if expanded && step.status == .done {
+                VStack(alignment: .leading, spacing: 2) {
+                    if !step.summary.isEmpty {
+                        Text(step.summary)
+                            .font(.caption.weight(.medium))
+                            .padding(.bottom, 2)
+                    }
+                    ForEach(Array(step.details.enumerated()), id: \.offset) { _, line in
+                        Text(line)
+                            .font(.system(size: 9, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                    }
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(.secondary.opacity(0.06), in: RoundedRectangle(cornerRadius: 6))
+            }
+        }
+    }
+
+    private var statusIcon: some View {
+        Group {
+            switch step.status {
+            case .pending:
+                Image(systemName: "circle")
+                    .foregroundStyle(.tertiary)
+            case .running:
+                ProgressView().scaleEffect(0.6).frame(width: 14, height: 14)
+            case .waitingUser:
+                Image(systemName: "hand.point.right.fill")
+                    .foregroundStyle(.orange)
+            case .done:
+                if let ok = step.passed {
+                    Image(systemName: ok ? "checkmark.circle.fill" : "xmark.circle.fill")
+                        .foregroundStyle(ok ? .green : .red)
+                } else {
+                    Image(systemName: "minus.circle")
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+        .font(.system(size: 13))
+        .frame(width: 16)
+    }
+}
+
+// MARK: - Waypoint Pan Panel
+
+private struct WaypointPanPanel: View {
+    @EnvironmentObject var ctl: GimbalController
+    @State private var duration: Double = 10.0
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Waypoint Pan")
+                .font(.headline)
+                .padding(.bottom, 2)
+
+            // Waypoint list
+            if ctl.gimbalWaypoints.isEmpty {
+                Text("No waypoints. Move the gimbal to a position and tap Add Waypoint.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                VStack(spacing: 4) {
+                    ForEach(Array(ctl.gimbalWaypoints.enumerated()), id: \.offset) { i, wp in
+                        HStack {
+                            Text("\(["A","B","C","D","E"][i])")
+                                .font(.caption.weight(.bold))
+                                .foregroundStyle(.orange)
+                                .frame(width: 16)
+                            Text(String(format: "P %+.1f°  Y %+.1f°", wp.pitch, wp.yaw))
+                                .font(.caption.monospacedDigit())
+                        }
+                    }
+                }
+                .padding(6)
+                .background(.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 6))
+            }
+
+            // Capture / Clear
+            HStack(spacing: 8) {
+                Button {
+                    ctl.captureWaypoint()
+                } label: {
+                    Label("Add Waypoint", systemImage: "plus.circle")
+                        .font(.caption)
+                }
+                .disabled(!ctl.isReady || ctl.gimbalWaypoints.count >= 5 || ctl.gimbalTimelapseRunning)
+
+                Button {
+                    ctl.clearWaypoints()
+                } label: {
+                    Label("Clear", systemImage: "trash")
+                        .font(.caption)
+                }
+                .disabled(ctl.gimbalWaypoints.isEmpty || ctl.gimbalTimelapseRunning)
+            }
+
+            // Duration slider
+            VStack(alignment: .leading, spacing: 4) {
+                HStack {
+                    Text("Duration")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Text("\(Int(duration)) s")
+                        .font(.caption.monospacedDigit())
+                }
+                Slider(value: $duration, in: 5...120, step: 5)
+                    .onAppear { duration = ctl.gimbalTimelapseDuration }
+                    .onChange(of: duration) { _, v in ctl.gimbalTimelapseDuration = v }
+            }
+
+            // Run / Stop
+            Button {
+                if ctl.gimbalTimelapseRunning {
+                    ctl.stopGimbalTimelapse()
+                } else {
+                    ctl.startGimbalTimelapse()
+                }
+            } label: {
+                Label(
+                    ctl.gimbalTimelapseRunning ? "Stop Pan" : "Run Pan",
+                    systemImage: ctl.gimbalTimelapseRunning ? "stop.fill" : "play.fill"
+                )
+                .frame(maxWidth: .infinity)
+                .foregroundStyle(ctl.gimbalTimelapseRunning ? .red : .green)
+            }
+            .disabled(!ctl.isReady || (!ctl.gimbalTimelapseRunning && ctl.gimbalWaypoints.count < 2))
+
+            Text("Up to 5 waypoints (A–E). Requires BLE connection. Axis mapping is experimental — validate on hardware.")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        }
+        .padding(12)
+    }
+}
+
 private struct SettingsPanel: View {
     @EnvironmentObject var ctl: GimbalController
     @EnvironmentObject var settings: SettingsModel
@@ -839,9 +1163,9 @@ private struct StatusChip: View {
                 Text(ctl.connectionState.label).font(.subheadline)
             }
             if let bat = ctl.battery {
-                Label("\(bat)%", systemImage: batteryIcon(bat))
+                Label("\(bat)%", systemImage: ctl.isCharging ? "battery.100.bolt" : batteryIcon(bat))
                     .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(ctl.isCharging ? .yellow : .secondary)
             }
         }
         .padding(.horizontal, 10)
@@ -1034,9 +1358,9 @@ private struct TelemetryHUD: View {
             Divider().background(.white.opacity(0.3))
             HStack(spacing: 8) {
                 if let bat = ctl.battery {
-                    Label("\(bat)%", systemImage: batteryIcon(bat))
+                    Label("\(bat)%", systemImage: ctl.isCharging ? "battery.100.bolt" : batteryIcon(bat))
                         .font(.system(size: 9, design: .rounded))
-                        .foregroundStyle(bat < 20 ? Color.red : bat < 40 ? Color.orange : Color.white.opacity(0.8))
+                        .foregroundStyle(ctl.isCharging ? Color.yellow : bat < 20 ? Color.red : bat < 40 ? Color.orange : Color.white.opacity(0.8))
                 }
                 Circle().fill(ctl.isReady ? .green : .gray).frame(width: 5, height: 5)
                 Text(ctl.connectionState.label)

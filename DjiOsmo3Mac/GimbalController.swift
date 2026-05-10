@@ -56,6 +56,11 @@ final class GimbalController: NSObject, ObservableObject {
     @Published var roll:  Double = 0
     @Published var yaw:   Double = 0
     @Published var battery: Int? = nil
+    @Published var isCharging: Bool = false
+    @Published var yawBody: Double = 0
+    @Published var gimbalWaypoints: [(pitch: Double, yaw: Double)] = []
+    @Published var gimbalTimelapseDuration: Double = 10.0
+    @Published var gimbalTimelapseRunning: Bool = false
     @Published private(set) var log: [LogEntry] = []
     @Published var pin:        String = DUML.defaultPin
     @Published var identifier: String = DUML.defaultIdentifier
@@ -139,11 +144,16 @@ final class GimbalController: NSObject, ObservableObject {
 
     // MARK: Reactive pipelines
 
+    private let frameSubject = PassthroughSubject<DUMLFrame, Never>()
+    var frameEvents: AnyPublisher<DUMLFrame, Never> { frameSubject.eraseToAnyPublisher() }
+
     private var cancellables = Set<AnyCancellable>()
     private var pairingCancellable: AnyCancellable?
     private var keyboardTimerCancellable: AnyCancellable?
     private var joystickDriveCancellable: AnyCancellable?
     private var debugSettleCancellable: AnyCancellable?
+    private var heartbeatCancellable: AnyCancellable?
+    private var gimbalTimelapseCancellable: AnyCancellable?
     private var heldKeys: Set<String> = []
     private var joystickRatePitch: Double = 0
     private var joystickRateYaw: Double = 0
@@ -186,14 +196,18 @@ final class GimbalController: NSObject, ObservableObject {
         case .disconnected:
             connectionState = .idle
             selected = nil
-            pitch = 0; roll = 0; yaw = 0
+            pitch = 0; roll = 0; yaw = 0; yawBody = 0
+            isCharging = false
+            stopGimbalTimelapse()
+            heartbeatCancellable = nil
 
         case .ready:
             connectionState = .connected
             appendLog(.info, "BLE characteristics ready.")
-            if autoPair { startPairing() } else { connectionState = .ready }
+            if autoPair { startPairing() } else { connectionState = .ready; startHeartbeat() }
 
         case .received(let frame):
+            frameSubject.send(frame)
             handleFrame(frame)
 
         case .log(let message):
@@ -254,6 +268,8 @@ final class GimbalController: NSObject, ObservableObject {
                 self.appendLog(.info, "Pairing timeout — proceeding (OM3 may not require PIN).")
                 self.pairingStep = .done
                 self.connectionState = .ready
+                self.startHeartbeat()
+                self.sendFeatureControl()
             }
     }
 
@@ -658,8 +674,8 @@ final class GimbalController: NSObject, ObservableObject {
             appendLog(.info, "  \(result.direction): \(String(format: "%+.1f", result.initialPitch))° → \(String(format: "%+.1f", result.finalPitch))° (Δ\(String(format: "%+.1f", result.movement))°) \(movementStr)", action: nil)
         }
 
-        let totalMovement = pitchSpeedTestResults.map { $0.movement }.reduce(0, +)
-        if abs(totalMovement) > 10 {
+        let hasSignificantMovement = pitchSpeedTestResults.allSatisfy { abs($0.movement) > 10 }
+        if hasSignificantMovement {
             appendLog(.info, "✅ CONCLUSÃO: Pitch responde a setSpeed (velocidade) — OM3 suporta controle por velocidade!", action: nil)
         } else {
             appendLog(.info, "❌ CONCLUSÃO: Pitch NÃO responde a setSpeed — problema diferente", action: nil)
@@ -787,6 +803,19 @@ final class GimbalController: NSObject, ObservableObject {
             if positionHistory.count > 14 { positionHistory.removeFirst() }
             return
 
+        // High-frequency position push — OM3 sends continuously.
+        // Layout: [pitch_lo pitch_hi roll_lo roll_hi yaw_lo yaw_hi yawBody_lo yawBody_hi ...]
+        // Bytes are 1/10° int16 LE. yawBody = heading relative to gimbal body.
+        case (DUML.CmdSet.gimbal, DUML.GimbalCmd.positionPush) where frame.payload.count >= 8:
+            let p = frame.payload
+            pitch   = Double(Int16(bitPattern: UInt16(p[0]) | UInt16(p[1]) << 8)) / 10
+            roll    = Double(Int16(bitPattern: UInt16(p[2]) | UInt16(p[3]) << 8)) / 10
+            yaw     = Double(Int16(bitPattern: UInt16(p[4]) | UInt16(p[5]) << 8)) / 10
+            yawBody = Double(Int16(bitPattern: UInt16(p[6]) | UInt16(p[7]) << 8)) / 10
+            positionHistory.append((pitch, yaw))
+            if positionHistory.count > 14 { positionHistory.removeFirst() }
+            return
+
         // Physical joystick deflection — OM3 sends at ~25Hz while joystick is held.
         // Host must translate deflection into setSpeed commands; the joystick does NOT
         // move the motor directly. Layout: [yaw_lo yaw_hi pitch_lo pitch_hi 0x01 flags]
@@ -804,9 +833,12 @@ final class GimbalController: NSObject, ObservableObject {
             }
             return
 
-        // Battery level — pushed every ~2s. payload[0] = 0..100 percent.
+        // Battery level — pushed every ~2s. payload[0] = 0..100 percent; payload.last == 0x01 = charging.
         case (DUML.CmdSet.gimbal, DUML.GimbalCmd.batteryLevel) where !frame.payload.isEmpty:
-            battery = Int(frame.payload[0])
+            let pct = Int(frame.payload[0])
+            battery = pct
+            isCharging = frame.payload.count >= 2 && frame.payload.last == 0x01
+            appendLog(.rx, "Battery: \(pct)% charging=\(isCharging) raw=[\(frame.payload.map { String(format: "%02X", $0) }.joined(separator: " "))]")
             return
 
         // Pairing responses
@@ -817,6 +849,8 @@ final class GimbalController: NSObject, ObservableObject {
                 pairingCancellable = nil
                 pairingStep = .done
                 connectionState = .ready
+                startHeartbeat()
+                sendFeatureControl()
             } else if status == 0x02 {
                 pairingStep = .waitingGimbal
                 appendLog(.rx, "Press the TRIGGER button on the gimbal to confirm pairing.")
@@ -827,6 +861,13 @@ final class GimbalController: NSObject, ObservableObject {
             pairingCancellable = nil
             pairingStep = .done
             connectionState = .ready
+            startHeartbeat()
+            sendFeatureControl()
+
+        case (DUML.CmdSet.gimbal, DUML.GimbalCmd.featureControl) where frame.isResponse:
+            let ok = frame.payload.first == 0x00
+            appendLog(ok ? .rx : .err,
+                      "FeatureControl response: \(ok ? "OK" : "FAIL") raw=[\(frame.payload.map { String(format: "%02X", $0) }.joined(separator: " "))]")
 
         default:
             logUnknownIfNeeded(frame)
@@ -836,7 +877,6 @@ final class GimbalController: NSObject, ObservableObject {
     private func logUnknownIfNeeded(_ frame: DUMLFrame) {
         // Suppress high-frequency known-background frames to keep the log useful.
         let silent: Set<UInt16> = [
-            UInt16(DUML.CmdSet.gimbal) << 8 | 0x05,  // unknown periodic telemetry
             UInt16(DUML.CmdSet.gimbal) << 8 | 0x0C,  // setSpeed ACK response
             UInt16(DUML.CmdSet.gimbal) << 8 | 0x57,  // joystickReport (handled above)
             UInt16(DUML.CmdSet.gimbal) << 8 | 0x19,  // GetGimbalState poll
@@ -869,6 +909,131 @@ final class GimbalController: NSObject, ObservableObject {
         ble.writeDUML(frame, encoded: encoded)
     }
 
+    // MARK: Heartbeat
+
+    private func startHeartbeat() {
+        heartbeatCancellable = Timer.publish(every: 2, on: .main, in: .common)
+            .autoconnect()
+            .sink { [weak self] _ in
+                guard let self, self.isReady else { return }
+                self.sendGimbal(cmd: DUML.GimbalCmd.heartbeat,
+                                payload: [0x01, 0x04, 0x05],
+                                label: "Heartbeat")
+            }
+    }
+
+    // MARK: Feature control
+
+    private func sendFeatureControl() {
+        sendGimbal(cmd: DUML.GimbalCmd.featureControl,
+                   payload: [0x01, 0xB0, 0x04, 0x00, 0x00, 0x00, 0x00, 0x80, 0x00, 0x00, 0x00],
+                   label: "FeatureControl")
+    }
+
+    // MARK: Waypoint timelapse (gimbal A→B pan)
+
+    func captureWaypoint() {
+        guard gimbalWaypoints.count < 5 else { return }
+        gimbalWaypoints.append((pitch: pitch, yaw: yaw))
+        appendLog(.info, "📍 Waypoint \(gimbalWaypoints.count) captured: P=\(String(format: "%+.1f", pitch))° Y=\(String(format: "%+.1f", yaw))°",
+                  action: "WaypointCapture")
+    }
+
+    func clearWaypoints() {
+        gimbalWaypoints.removeAll()
+        appendLog(.info, "🗑 Waypoints cleared", action: "WaypointClear")
+    }
+
+    func startGimbalTimelapse() {
+        guard gimbalWaypoints.count >= 2 else {
+            appendLog(.err, "❌ Need at least 2 waypoints to start pan.", action: "TimelapsError")
+            return
+        }
+        guard isReady else { return }
+
+        let waypoints = gimbalWaypoints
+        let durationMs = UInt32(gimbalTimelapseDuration * 1000)
+
+        // Send 3 heartbeats then feature control before the timelapse command.
+        for i in 0..<3 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + Double(i) * 0.5) { [weak self] in
+                guard let self, self.isReady else { return }
+                self.sendGimbal(cmd: DUML.GimbalCmd.heartbeat, payload: [0x01, 0x04, 0x05],
+                                label: "Heartbeat (timelapse prep)")
+            }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.6) { [weak self] in
+            guard let self, self.isReady else { return }
+            self.sendFeatureControl()
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) { [weak self] in
+            guard let self, self.isReady else { return }
+            self.sendTimelapseStart(waypoints: waypoints, durationMs: durationMs)
+        }
+
+        gimbalTimelapseRunning = true
+        appendLog(.info, "🎬 Gimbal waypoint pan started (\(waypoints.count) points, \(Int(gimbalTimelapseDuration))s)",
+                  action: "TimelapsStart")
+
+        // Keep heartbeat + feature control alive during execution.
+        gimbalTimelapseCancellable = Timer.publish(every: 1, on: .main, in: .common)
+            .autoconnect()
+            .sink { [weak self] _ in
+                guard let self, self.gimbalTimelapseRunning, self.isReady else { return }
+                self.sendGimbal(cmd: DUML.GimbalCmd.heartbeat, payload: [0x01, 0x04, 0x05],
+                                label: "Heartbeat (timelapse running)")
+                self.sendFeatureControl()
+            }
+
+        // Auto-stop after duration + 2s buffer.
+        DispatchQueue.main.asyncAfter(deadline: .now() + gimbalTimelapseDuration + 2) { [weak self] in
+            guard let self, self.gimbalTimelapseRunning else { return }
+            self.stopGimbalTimelapse()
+        }
+    }
+
+    func stopGimbalTimelapse() {
+        guard gimbalTimelapseRunning else { return }
+        gimbalTimelapseRunning = false
+        gimbalTimelapseCancellable = nil
+        appendLog(.info, "⏹ Gimbal waypoint pan stopped", action: "TimelapsStop")
+    }
+
+    private func sendTimelapseStart(waypoints: [(pitch: Double, yaw: Double)], durationMs: UInt32) {
+        let count = waypoints.count
+        // Payload: [0x12, count, dur uint32LE (4 bytes), 00 00, (yaw roll pitch 4*00) per keyframe]
+        var payload = [UInt8]()
+        payload.append(0x12)                             // opcode: start
+        payload.append(UInt8(count))
+        payload.append(UInt8(durationMs & 0xFF))
+        payload.append(UInt8((durationMs >> 8) & 0xFF))
+        payload.append(UInt8((durationMs >> 16) & 0xFF))
+        payload.append(UInt8((durationMs >> 24) & 0xFF))
+        payload.append(0x00); payload.append(0x00)       // reserved
+
+        for (i, wp) in waypoints.enumerated() {
+            // Axis mapping from OM Research web-bluetooth-enhancements fork:
+            // payload yaw  ← live yaw  × 10
+            // payload roll ← 0
+            // payload pitch ← 500 on first keyframe, 0 on others
+            let yawVal   = Int16((wp.yaw * 10).rounded())
+            let rollVal  = Int16(0)
+            let pitchVal = Int16(i == 0 ? 500 : 0)
+            func appendInt16(_ v: Int16) {
+                let u = UInt16(bitPattern: v)
+                payload.append(UInt8(u & 0xFF))
+                payload.append(UInt8((u >> 8) & 0xFF))
+            }
+            appendInt16(yawVal)
+            appendInt16(rollVal)
+            appendInt16(pitchVal)
+            payload.append(contentsOf: [0x00, 0x00, 0x00, 0x00])  // padding
+        }
+
+        sendGimbal(cmd: DUML.GimbalCmd.timelapseStart, payload: payload,
+                   label: "TimelapsStart(\(count) waypoints)", action: "TimelapsStart")
+    }
+
     // MARK: Joystick curve
     // Applies deadzone + quadratic curve to a raw OM3 joystick axis value (-1000..+1000).
     // Returns a normalized speed fraction in -1..+1.
@@ -886,19 +1051,30 @@ final class GimbalController: NSObject, ObservableObject {
 
     // MARK: Log
 
+    /// Public entry point for subsystems (e.g. GimbalCheckup) to write to the shared log.
+    func checkupLog(_ text: String) {
+        appendLog(.info, text, action: "Checkup")
+    }
+
     private func appendLog(_ d: LogEntry.Direction, _ text: String,
                           action: String? = nil, payload: [UInt8]? = nil) {
         let entry = LogEntry(timestamp: Date(), direction: d, text: text,
                             action: action, payload: payload)
-        // Filter: skip frequent background frames if hideFrequentLogs is on
-        if hideFrequentLogs && d == .rx {
-            let silentCmdIds = Set([UInt8(0x02), UInt8(0x19), UInt8(0x27), UInt8(0x57), UInt8(0x1C)])
-            // Extract cmdId from log text (e.g., "← cmdSet=04 cmdId=02")
-            if let range = text.range(of: "cmdId=") {
+        // Filter: suppress high-frequency background traffic when hideFrequentLogs is on.
+        // "Checkup" action entries are always shown regardless.
+        if hideFrequentLogs && action != "Checkup" {
+            // Speed commands: ~30 Hz human-readable summary + raw TX frame
+            if action == "SetSpeed" { return }
+            if d == .tx && text.hasPrefix("→ Speed(") { return }
+            // Heartbeat TX (~0.5 Hz) and its RX ack
+            if d == .tx && text.hasPrefix("→ Heartbeat") { return }
+            // getPos telemetry push (~1 Hz)
+            if d == .rx && text.hasPrefix("getPos raw:") { return }
+            // Other periodic RX frames by cmdId (positionPush, joystick, battery, etc.)
+            if d == .rx, let range = text.range(of: "cmdId=") {
                 let hexStr = String(text[range.upperBound...].prefix(2))
-                if let cmdId = UInt8(hexStr, radix: 16), silentCmdIds.contains(cmdId) {
-                    return  // skip this log
-                }
+                let silentCmdIds = Set<UInt8>([0x02, 0x04, 0x19, 0x27, 0x50, 0x57, 0x1C])
+                if let cmdId = UInt8(hexStr, radix: 16), silentCmdIds.contains(cmdId) { return }
             }
         }
         // Filter: show only action logs if requested

@@ -48,14 +48,24 @@ enum DUML {
         // 0x02: getPos pull response — OM3 sends this every ~1s as position telemetry.
         // Layout: [flags pitch_lo pitch_hi roll_lo roll_hi yaw_lo yaw_hi ? ?] (9 bytes, 1/10°)
         static let getPos:         UInt8 = 0x02
+        // 0x05: high-frequency position push (45+ bytes).
+        // Layout: [pitch_lo pitch_hi roll_lo roll_hi yaw_lo yaw_hi yawBody_lo yawBody_hi ...]
+        static let positionPush:   UInt8 = 0x05
         static let angleSet:       UInt8 = 0x0A
         static let speedCtrl:      UInt8 = 0x0C // angular velocity — payload: [pitch, roll, yaw, mode]
         static let absAngle:       UInt8 = 0x14 // absolute angle — payload: [yaw, roll, pitch, axisMask, dur]
         // NOTE: absAngle byte order (yaw-first) differs from speedCtrl (pitch-first).
         static let movement:       UInt8 = 0x15
+        // 0x25: waypoint timelapse start — list of keyframes + duration.
+        // payload: [0x12, count, dur_ms uint32LE, 00 00, (yaw roll pitch padding)*count]
+        static let timelapseStart: UInt8 = 0x25
         static let setMode:        UInt8 = 0x4C // 0=lock, 1=follow, 2=fpv (sport)
         // 0x1C: battery level push every ~2s. payload[0] = 0..100 percent.
         static let batteryLevel:   UInt8 = 0x1C
+        // 0x50: session heartbeat — send every ~2s to keep advanced control active.
+        static let heartbeat:      UInt8 = 0x50
+        // 0x54: feature control — must be sent before waypoint timelapse.
+        static let featureControl: UInt8 = 0x54
         // 0x57: physical joystick deflection at ~25Hz while held.
         // Layout: [yaw_lo yaw_hi pitch_lo pitch_hi 0x01 flags] (6 bytes, raw -1000..+1000)
         // Host must respond with setSpeed commands; the joystick does NOT move the gimbal directly.
@@ -306,12 +316,15 @@ enum GimbalPayloadBuilder {
     static func setSpeed(pitchDeg: Double, yawDeg: Double) -> (cmdId: UInt8, payload: [UInt8]) {
         let p = Int16(clamping: Int(-pitchDeg * 10).clamped(-1800, 1800))  // Pitch direction inverted
         let y = Int16(clamping: Int(yawDeg   * 10).clamped(-1800, 1800))
-        // OM3 speedCtrl (0x0c) wire layout: [yaw:i16LE, roll:i16LE, pitch:i16LE, mode:u8, time:u8]
-        // mode=0x80 for SPEED (velocity control), time=0 for continuous.
-        // NOTE: Pitch direction is inverted on OM3 — negative pitch commands move up.
+        // speedCtrl (0x0c) wire layout: [yaw:i16LE, roll:i16LE, pitch:i16LE, mode:u8, time:u8]
+        // mode=0x80 for SPEED (velocity control).
+        // time = duration in 1/10s the gimbal executes this speed. OM4 requires time>0 (time=0 means
+        // "move for 0 seconds"). Set to 15 (1.5s); the control loop re-sends at ~30Hz so the timer
+        // continuously resets, giving smooth continuous motion on both OM3 and OM4.
+        // NOTE: Pitch direction is inverted — negative pitch commands move up.
         var payload = i16(y) + i16(0) + i16(p)
         payload.append(DUML.RotationMode.speed.rawValue)
-        payload.append(0)  // time=0 for continuous velocity mode
+        payload.append(15)  // time=15 (1.5s window); OM4 requires >0, control loop resets continuously
         return (DUML.GimbalCmd.speedCtrl, payload)
     }
 

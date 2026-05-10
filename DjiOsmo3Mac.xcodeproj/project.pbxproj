@@ -17,6 +17,7 @@
 		B201000000000000000A0008 /* CameraPreviewView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B101000000000000000A000A /* CameraPreviewView.swift */; };
 		B201000000000000000A0009 /* TrackingEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = B101000000000000000A000B /* TrackingEngine.swift */; };
 		B201000000000000000A000A /* SettingsModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = B101000000000000000A000C /* SettingsModel.swift */; };
+		B201000000000000000A000B /* GimbalCheckup.swift in Sources */ = {isa = PBXBuildFile; fileRef = B101000000000000000A000D /* GimbalCheckup.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -33,6 +34,7 @@
 		B101000000000000000A000A /* CameraPreviewView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CameraPreviewView.swift; sourceTree = "<group>"; };
 		B101000000000000000A000B /* TrackingEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrackingEngine.swift; sourceTree = "<group>"; };
 		B101000000000000000A000C /* SettingsModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsModel.swift; sourceTree = "<group>"; };
+		B101000000000000000A000D /* GimbalCheckup.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GimbalCheckup.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -66,6 +68,7 @@
 				B101000000000000000A000A /* CameraPreviewView.swift */,
 				B101000000000000000A000B /* TrackingEngine.swift */,
 				B101000000000000000A000C /* SettingsModel.swift */,
+				B101000000000000000A000D /* GimbalCheckup.swift */,
 				B101000000000000000A0006 /* Assets.xcassets */,
 				B101000000000000000A0007 /* Info.plist */,
 				B101000000000000000A0008 /* DjiOsmo3Mac.entitlements */,
@@ -159,6 +162,7 @@
 				B201000000000000000A0008 /* CameraPreviewView.swift in Sources */,
 				B201000000000000000A0009 /* TrackingEngine.swift in Sources */,
 				B201000000000000000A000A /* SettingsModel.swift in Sources */,
+				B201000000000000000A000B /* GimbalCheckup.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
