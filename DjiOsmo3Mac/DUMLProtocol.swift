@@ -62,12 +62,16 @@ enum DUML {
         static let joystickReport: UInt8 = 0x57
     }
 
-    // Named payload constants for absAngle and speedCtrl commands.
-    // Values confirmed against lib-osmo-ble / node-osmo wire captures.
+    // Rotation modes for gimbal commands (from OM Research project).
+    // The mode byte in rotate payload determines the type of movement.
+    enum RotationMode: UInt8 {
+        case relative = 0x04  // relative movement
+        case absolute = 0x05  // absolute angle positioning
+        case speed    = 0x80  // velocity control mode
+    }
+
+    // Deprecated: use RotationMode instead
     enum GimbalPayload {
-        static let axisAllThree:    UInt8 = 0x07  // pitch + roll + yaw bitmask
-        static let axisPitchYaw:    UInt8 = 0x05  // pitch + yaw only (no roll)
-        static let velocityControl: UInt8 = 0x01  // mode byte for speedCtrl
         static let defaultDuration: UInt8 = 30    // absAngle ramp time in 1/10 s
     }
 
@@ -275,8 +279,8 @@ extension Comparable {
 enum GimbalPayloadBuilder {
 
     static func recenter() -> (cmdId: UInt8, payload: [UInt8]) {
-        var p = i16(0) + i16(0) + i16(0)
-        p.append(DUML.GimbalPayload.axisAllThree)
+        var p = i16(0) + i16(0) + i16(0)  // yaw=0, roll=0, pitch=0
+        p.append(DUML.RotationMode.absolute.rawValue)  // mode=ABSOLUTE
         p.append(DUML.GimbalPayload.defaultDuration)
         return (DUML.GimbalCmd.absAngle, p)
     }
@@ -290,10 +294,10 @@ enum GimbalPayloadBuilder {
         let p   = Int16(clamping: Int(pitchDeg * 10).clamped(-1800, 1800))
         let y   = Int16(clamping: Int(yawDeg   * 10).clamped(-1800, 1800))
         let dur = UInt8(min(255, max(1, Int(durationSec * 10))))
-        // OM3 absAngle (0x14) wire layout: [yaw, roll, pitch, axisMask, dur]
-        // Verified against lib-osmo-ble (Pocket 3) and node-osmo captures.
+        // OM3 absAngle (0x14) wire layout: [yaw:i16LE, roll:i16LE, pitch:i16LE, mode:u8, time:u8]
+        // Verified against OM Research (alkersan/om-research) — mode=0x05 for ABSOLUTE.
         var payload = i16(y) + i16(0) + i16(p)
-        payload.append(DUML.GimbalPayload.axisPitchYaw)
+        payload.append(DUML.RotationMode.absolute.rawValue)
         payload.append(dur)
         return (DUML.GimbalCmd.absAngle, payload)
     }
@@ -301,8 +305,11 @@ enum GimbalPayloadBuilder {
     static func setSpeed(pitchDeg: Double, yawDeg: Double) -> (cmdId: UInt8, payload: [UInt8]) {
         let p = Int16(clamping: Int(pitchDeg * 10).clamped(-1800, 1800))
         let y = Int16(clamping: Int(yawDeg   * 10).clamped(-1800, 1800))
-        var payload = i16(p) + i16(0) + i16(y)
-        payload.append(DUML.GimbalPayload.velocityControl)
+        // OM3 speedCtrl (0x0c) wire layout: [yaw:i16LE, roll:i16LE, pitch:i16LE, mode:u8, time:u8]
+        // mode=0x80 for SPEED (velocity control), time=0 for continuous.
+        var payload = i16(y) + i16(0) + i16(p)
+        payload.append(DUML.RotationMode.speed.rawValue)
+        payload.append(0)  // time=0 for continuous velocity mode
         return (DUML.GimbalCmd.speedCtrl, payload)
     }
 
