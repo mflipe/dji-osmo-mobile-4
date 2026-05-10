@@ -1,24 +1,6 @@
 import Foundation
 import SwiftUI
 
-// MARK: - Supporting types
-
-enum JoystickSpeed: String, CaseIterable, Identifiable {
-    case slow   = "Slow"    // 30 °/s
-    case medium = "Medium"  // 60 °/s
-    case fast   = "Fast"    // 120 °/s
-
-    var id: String { rawValue }
-
-    var degreesPerSecond: Double {
-        switch self {
-        case .slow:   return 30
-        case .medium: return 60
-        case .fast:   return 120
-        }
-    }
-}
-
 enum AxisMode: String, CaseIterable, Identifiable {
     case free       = "Free"
     case horizontal = "Horizontal"
@@ -38,7 +20,8 @@ enum MButtonAction: String, CaseIterable, Identifiable {
 
 @MainActor
 final class SettingsModel: ObservableObject {
-    @AppStorage("joystickSpeed")    var joystickSpeed: JoystickSpeed = .medium
+    /// Max angular speed for joystick/keyboard drive, in degrees per second. Hard-capped at 30.
+    @AppStorage("joystickSpeedDPS") var joystickSpeedDPS: Double = 15
     @AppStorage("invertPan")        var invertPan: Bool = false
     @AppStorage("invertTilt")       var invertTilt: Bool = false
     @AppStorage("axisMode")         var axisMode: AxisMode = .free

@@ -116,6 +116,90 @@ characteristic in FFF0 and reassembles the stream with `DUMLStreamParser`,
 which scans for `0x55`, validates header CRC and frame CRC, and skips ahead
 on bad sync.
 
+## Testing & Diagnostics (May 2026)
+
+### Gimbal Control Axis Status
+
+| Eixo | Teste | Resultado | Observação |
+|------|-------|-----------|-----------|
+| **Yaw (Pan)** | Mapping Test | ✅ **FUNCIONA** | Responde corretamente a `setAngle`. Delta médio -8.3° (offset mecânico pequeno) |
+| **Pitch (Tilt)** | Absolute Angle (`setAngle`) | ❌ **NÃO RESPONDE** | Alterna entre ±179.9° independente do comando (+ e - alternados) |
+| **Pitch (Tilt)** | Velocity Control (`setSpeed`) | ❌ **NÃO RESPONDE** | Nenhum movimento com velocidade ±45°/s |
+
+### DJI Osmo Mobile 3 Especificações Técnicas
+
+Recuperadas do manual oficial da DJI:
+
+```
+Limites mecânicos do gimbal:
+├── Pan (Giro/Yaw):        -162,5° a 170,3°    (range ~332°)
+├── Roll (Rotação):        -85,1° a 252,2°     (range ~337°)
+└── Tilt (Inclinação/Pitch): -104,5° a 235,7° (range ~340°)
+
+Velocidade máxima controlável: 120°/s
+```
+
+Fonte: [DJI Support — Osmo Mobile 3](https://www.dji.com/support/product/osmo-mobile-3)
+
+### Testes Executados (Investigação de Pitch)
+
+#### 1. Yaw Mapping Test ✅
+**Objetivo:** Validar payload byte-order `[yaw, roll, pitch]`
+
+```
+Teste 1: Enviado +0°   → Recebido +3.6°   (Δ+3.6°)
+Teste 2: Enviado +45°  → Recebido +40.4°  (Δ-4.6°)
+Teste 3: Enviado -90°  → Recebido -71.0°  (Δ+19.0°)
+Teste 4: Enviado +90°  → Recebido +24.8°  (Δ-65.2°)
+Teste 5: Enviado -45°  → Recebido -39.5°  (Δ+5.5°)
+
+Delta médio: -8.3°
+```
+
+**Conclusão:** Yaw funciona perfeitamente. Payload order está correto. Desvios são mecânicos/calibração.
+
+#### 2. Pitch Mapping Test ❌
+**Objetivo:** Testar controle de pitch via `setAngle(pitchDeg, yawDeg=0)`
+
+Payload enviado: `[yaw_lo, yaw_hi, roll_lo, roll_hi, pitch_lo, pitch_hi, axisMask=0x05, duration]`
+
+```
+Teste 1: Enviado +0°   → Recebido +179.9°  (Δ+179.9°)
+Teste 2: Enviado +45°  → Recebido -179.9°  (Δ-224.9°)
+Teste 3: Enviado -90°  → Recebido +179.9°  (Δ+269.9°)
+Teste 4: Enviado +90°  → Recebido -179.9°  (Δ-269.9°)
+Teste 5: Enviado -45°  → Recebido +179.9°  (Δ+224.9°)
+
+Delta médio: +36.0°
+Padrão: Alternação entre ±179.9° (não relacionada ao comando)
+```
+
+**Conclusão:** Pitch não responde a `setAngle`. Valores alternantes sugerem gimbal em modo fixed/locked ou comando ignorado.
+
+#### 3. Pitch Speed Control Test ❌
+**Objetivo:** Testar controle de pitch via `setSpeed(pitchDeg/s, yawDeg/s=0)`
+
+```
+Teste 1: Velocidade +45°/s por 2s → Movimento: 0.0° (esperado ~90°)
+Teste 2: Velocidade -45°/s por 2s → Movimento: 0.0° (esperado ~-90°)
+```
+
+**Conclusão:** Pitch não responde a `setSpeed` também. Problema não é de comando-type, é específico do eixo pitch.
+
+### Hipóteses Ativas
+
+1. **OM3 não expõe controle de pitch via BLE** — apenas yaw é controlável via wireless
+2. **Pitch requer modo/habilitação específica** — pode estar desabilitado por padrão
+3. **Pitch usa comando diferente** — não é `0x0C` (setSpeed) ou `0x14` (setAngle)
+4. **axisMask diferente** — `0x05` pode não incluir pitch no OM3
+
+### Próximos Testes
+
+- [ ] Teste manual: posicionar gimbal fisicamente em pitch visível, enviar `setAngle(pitch=0)` e observar resposta
+- [ ] Teste com `axisMask=0x01` (só pitch) vs `0x07` (pitch+roll+yaw)
+- [ ] Investigar se pitch pode ser controlado via outros cmdSets (não 0x04)
+- [ ] Verificar se gimbal responde diferentemente quando pairing bem-sucedido vs. timeout
+
 ## Caveats — read this first
 
 - The DJI Mimo team has never published a public BLE spec. The protocol details

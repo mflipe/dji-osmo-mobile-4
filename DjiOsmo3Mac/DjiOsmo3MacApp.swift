@@ -11,9 +11,9 @@ struct DjiOsmo3MacApp: App {
                 .environmentObject(controller.cameraManager)
                 .environmentObject(controller.settings)
         }
-        .windowStyle(.plain)
         .windowToolbarStyle(.unified(showsTitle: false))
         .defaultSize(width: 1100, height: 720)
+        .windowResizability(.contentMinSize)
         .commands {
             CommandGroup(replacing: .newItem) {}
             CommandMenu("Gimbal") {

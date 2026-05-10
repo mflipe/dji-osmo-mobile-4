@@ -75,7 +75,7 @@ final class TrackingEngine {
             }
         }
 
-        guard let box = bounds else { return Output(pitch: 0, yaw: 0, bounds: nil) }
+        guard let box = bounds else { return nil }
 
         // Error = distance from frame centre to subject centre, normalised [-0.5..0.5].
         let subjectCX = box.midX - 0.5
