@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Compiles and runs the standalone unit tests. Requires only the Swift
-# toolchain (Command Line Tools) — no Xcode test target needed.
+# Compile and run the standalone DUML unit tests.
+# Requires only the Swift command-line toolchain (Xcode CLT).
 #
 #   bash Tests/run_tests.sh
 set -euo pipefail

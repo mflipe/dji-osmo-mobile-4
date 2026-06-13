@@ -46,7 +46,7 @@ struct AxisOffsetModel {
     private(set) var offsetDegrees: Double?
 
     /// Call after commanding a known absolute angle and letting the gimbal
-    /// settle: stores (telemetry - command), wrapped, as the axis offset.
+    /// settle: stores (observed - commanded), wrapped, as the axis offset.
     mutating func capture(commandedDegrees: Double, observedDegrees: Double) {
         offsetDegrees = TelemetryNormalization.angularDifference(observedDegrees, commandedDegrees)
     }
@@ -57,8 +57,7 @@ struct AxisOffsetModel {
         return TelemetryNormalization.normalizeDegrees(observedDegrees - offset)
     }
 
-    /// The value telemetry should report once a commanded move completes
-    /// (useful to verify the hypothesis during the F0 experiment).
+    /// The value telemetry should report once a commanded move completes.
     func expectedObservedAngle(forCommanded commandedDegrees: Double) -> Double {
         guard let offset = offsetDegrees else { return commandedDegrees }
         return TelemetryNormalization.normalizeDegrees(commandedDegrees + offset)

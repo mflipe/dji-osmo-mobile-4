@@ -1,57 +1,72 @@
-# F0 — Experimento do Pitch (offset de telemetria)
+# F0 — Experimento do pitch (offset de telemetria)
 
 ## Hipótese
 
-O pitch **não está morto**. O frame de coordenadas dos comandos absolutos (`0x14`, modo `0x05`) e o frame da telemetria (`0x02`/`0x05`) divergem por um **offset constante por eixo**:
+O pitch **não está morto**. O frame de coordenadas dos comandos absolutos (`0x14`, modo `0x05`) e o frame da telemetria (`getPos 0x02` / `positionPush 0x05`) divergem por um **offset constante por eixo**, com wraparound em ±180°:
 
 | Eixo | Comando 0° | Telemetria lida (OM3 de referência) |
 |---|---|---|
 | Pitch | 0° | ≈ **-179,9°** |
-| Yaw | 0° | ≈ **-91°** |
+| Yaw   | 0° | ≈ **-91°** |
 
-Isso explica os logs deste repo com pitch oscilando em ±179,9° "sem responder": o controle compara o alvo com uma leitura em outro frame e satura.
+Esso explica os logs deste repo com pitch oscilando em ±179,9° "sem responder": o controlador compara o alvo com uma leitura em outro frame e satura.
 
-## Estratégias implementadas nesta PR
+## Arquivos desta PR
 
-- **A — Absoluto + normalização:** continuar usando `setAngle` (modo `0x05`) e corrigir a telemetria com `AxisOffsetModel` (`DjiOsmo3Mac/TelemetryNormalization.swift`).
-- **B — Relativo:** `GimbalPayloadBuilder.setAngleRelative` (modo `0x04`), que ignora o frame absoluto.
-- **Heartbeat:** `GimbalPayloadBuilder.heartbeat()` (`0x50`, payload `01 04 05`, a cada ~2s) para descartar gating de sessão. O feature control (`0x54`) ficou de fora por payload ainda não confirmado — confirmar no fork OM Research antes de implementar.
+| Arquivo | O que faz |
+|---|---|
+| `DjiOsmo3Mac/TelemetryNormalization.swift` | `TelemetryNormalization` (normalize/wraparound) + `AxisOffsetModel` (captura e aplica offset por eixo) |
+| `DjiOsmo3Mac/PitchExperiment.swift` | `GimbalPayloadBuilder.setAngleRelative` (modo 0x04) + `heartbeat()` (0x50) + `PitchExperimentPlan.steps()` |
+| `Tests/main.swift` | 50+ testes unitários: CRC, encode/decode, payload layouts, normalização, wraparound, stream parser |
+| `Tests/run_tests.sh` | `bash Tests/run_tests.sh` — sem Xcode test target |
 
-## Antes do teste manual: rodar os testes unitários
+## Estratégias implementadas
+
+- **A — Absoluto + normalização:** manter `setAngle` (modo `0x05`) e corrigir a telemetria com `AxisOffsetModel` antes de alimentar o PID.
+- **B — Relativo:** `setAngleRelative` (modo `0x04`) — bypassa o frame absoluto, move por delta a partir da posição física atual.
+- **Heartbeat:** `heartbeat()` (`0x50`, payload `01 04 05`, a cada ~2s) para descartar session gating. `0x54` ficou fora — payload precisa ser confirmado no fork om-research antes.
+
+> Esta PR **não altera** `GimbalController.swift` nem `ContentView.swift` — só adiciona arquivos novos. Seguro fazer merge sem build.
+
+## Antes do teste: rodar os testes unitários
 
 ```bash
 bash Tests/run_tests.sh
 ```
 
-Cobrem: CRC8/16 contra implementação independente, encode/decode de frame (seq big-endian, CRCs), resync do stream parser, layouts dos payloads (yaw-first, inversão de pitch, clamps, modos 0x04/0x05/0x80) e a matemática de offset/wraparound.
+Devem todos passar offline (sem gimbal). Cobrem: CRC contra implementação independente, roundtrip de frame, layouts de payload (yaw-first, inversão de pitch, modos 0x04/0x05/0x80, clamps), normalização angular e wraparound em ±180°.
 
 ## Protocolo de teste manual (com o OM3)
 
-Os passos estão codificados em `PitchExperimentPlan.steps()` — envie cada payload pelo caminho BLE existente (cmdSet `0x04`, flag request), aguarde `settleSeconds` e anote a telemetria **crua** P/R/Y:
+Os passos estão codificados em `PitchExperimentPlan.steps()`. Envie cada payload pelo caminho BLE existente (`cmdSet = 0x04`, flag `0x40`), aguarde `settleSeconds` e anote a telemetria crua P/R/Y:
 
-| # | Passo | O que anotar |
+| # | Passo | Observe |
 |---|---|---|
-| 1 | Heartbeat `0x50` | Erro? (repetir a cada ~2s durante todo o teste) |
-| 2 | Recenter absoluto 0/0/0 | P/Y de referência (esperado ≈ -179,9 / -91) |
+| 1 | Heartbeat `0x50` | Erro de resposta? (repetir a cada ~2s) |
+| 2 | Recenter absoluto 0/0/0 | Anotar P/Y de referência (hipótese: ≈ -179,9 / -91) |
 | 3 | Absoluto pitch +30° | Moveu fisicamente? Telemetria corrigida ≈ +30? |
-| 4 | Absoluto pitch -30° | Moveu para o outro lado? ≈ -30? |
-| 5 | Relativo pitch +20° (`0x04`) | Moveu? (se 3-4 falharam e este funcionou → Estratégia B) |
-| 6 | Relativo pitch -20° (`0x04`) | Voltou ~20°? |
+| 4 | Absoluto pitch -30° | Outro lado? ≈ -30? |
+| 5 | Relativo pitch +20° (0x04) | Moveu ~20° do atual? (se 3-4 falharam e este funciona → Estratégia B) |
+| 6 | Relativo pitch -20° (0x04) | Voltou ~20°? |
 | 7 | Recenter final | Telemetria voltou à referência do passo 2? |
 
 ### Interpretação
 
 | Resultado | Conclusão | Próximo passo |
 |---|---|---|
-| 3-4 movem e offset bate | Hipótese confirmada (Estratégia A) | Aplicar `AxisOffsetModel` no loop de controle/tracking |
-| Só 5-6 movem | Frame absoluto inutilizável p/ pitch (Estratégia B) | Migrar tracking p/ deltas relativos |
-| Nada move, sem heartbeat → nada; com heartbeat → move | Gating de sessão | Integrar heartbeat permanente no GimbalController |
-| Nada move em nenhum caso | Hipótese refutada | Capturar log RX completo e investigar 0x54/firmware |
+| 3–4 movem e offset bate | Estratégia A confirmada | Integrar `AxisOffsetModel` no loop PID do `GimbalController` |
+| Só 5–6 movem | Frame absoluto inútil p/ pitch | Migrar tracking para deltas relativos |
+| Nada s/ heartbeat; com → move | Session gating | Integrar heartbeat permanente no `GimbalController` |
+| Nada em nenhum caso | Hipótese refutada | Log RX completo; investigar `0x54`/firmware |
 
-> Registrar os resultados também no plano de validação (Notion).
+> Registrar resultados também no plano de validação (Notion).
 
-## Integração (fora desta PR, de propósito)
+## Integração no GimbalController (fora desta PR, de propósito)
 
-Esta PR **não** altera `GimbalController.swift`/`ContentView.swift` — só adiciona arquivos novos, para ser segura sem build. Após o experimento confirmar a estratégia vencedora, a integração no loop de controle vem em PR separada.
+Depois do experimento confirmar a estratégia vencedora:
+1. Adicionar `AxisOffsetModel` para pitch e yaw em `GimbalController`.
+2. Capturar offset ao final de `recenter()` (aguardar settle ~2s, ler telemetria).
+3. Aplicar `commandFrameAngle` antes de comparar com o target no loop PID.
+4. Ou migrar `setAngle`/PID para deltas relativos (Estratégia B).
 
-**Nota Xcode:** se o projeto não usar folder references sincronizadas, adicione os novos arquivos `DjiOsmo3Mac/*.swift` ao target manualmente (drag & drop no Xcode).
+**Nota Xcode:** se o projeto não usar folder references sincronizadas, adicionar os novos `.swift` ao target manualmente (drag & drop → ✓ target membership).
