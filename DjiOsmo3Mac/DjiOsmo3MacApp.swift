@@ -2,13 +2,17 @@ import SwiftUI
 
 @main
 struct DjiOsmo3MacApp: App {
-    @StateObject private var controller = GimbalController()
+    @StateObject private var controller: GimbalController
     @StateObject private var checkup: GimbalCheckup
+    @StateObject private var telemetryOffset: TelemetryOffsetModel
+    @StateObject private var demo: DemoModeController
 
     init() {
         let ctl = GimbalController()
-        _controller = StateObject(wrappedValue: ctl)
-        _checkup    = StateObject(wrappedValue: GimbalCheckup(controller: ctl))
+        _controller      = StateObject(wrappedValue: ctl)
+        _checkup         = StateObject(wrappedValue: GimbalCheckup(controller: ctl))
+        _telemetryOffset = StateObject(wrappedValue: TelemetryOffsetModel(controller: ctl))
+        _demo            = StateObject(wrappedValue: DemoModeController())
     }
 
     var body: some Scene {
@@ -18,6 +22,8 @@ struct DjiOsmo3MacApp: App {
                 .environmentObject(controller.cameraManager)
                 .environmentObject(controller.settings)
                 .environmentObject(checkup)
+                .environmentObject(telemetryOffset)
+                .environmentObject(demo)
         }
         .windowToolbarStyle(.unified(showsTitle: false))
         .defaultSize(width: 1100, height: 720)
@@ -36,6 +42,17 @@ struct DjiOsmo3MacApp: App {
                     .keyboardShortcut("t", modifiers: [.command])
                     .disabled(!controller.isReady)
             }
+        }
+
+        MenuBarExtra("Osmo", systemImage: "camera.aperture") {
+            QuickControlMenu()
+                .environmentObject(controller)
+        }
+        .menuBarExtraStyle(.window)
+
+        Settings {
+            AppSettingsView()
+                .environmentObject(telemetryOffset)
         }
     }
 }
